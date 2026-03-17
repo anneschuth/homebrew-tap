@@ -1,4 +1,4 @@
-name: Update formula
+name: Update formulas
 
 on:
   schedule:
@@ -10,16 +10,31 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - package: parro
+            formula: Formula/parro.rb
+          - package: kovnet
+            formula: Formula/kovnet.rb
     steps:
       - uses: actions/checkout@v4
 
       - name: Check for new version
         id: check
         run: |
+          PACKAGE="${{ matrix.package }}"
+          FORMULA="${{ matrix.formula }}"
           # Get latest version from PyPI
-          LATEST=$(curl -s https://pypi.org/pypi/parro/json | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])")
+          LATEST=$(curl -s "https://pypi.org/pypi/${PACKAGE}/json" | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || echo "")
+          if [ -z "$LATEST" ]; then
+            echo "Package not yet on PyPI, skipping"
+            echo "update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Get current version from formula
-          CURRENT=$(grep -oP 'parro-\K[0-9.]+(?=\.tar\.gz)' Formula/parro.rb)
+          CURRENT=$(grep -oP "${PACKAGE}-\K[0-9.]+" "$FORMULA" || echo "0.0.0")
           echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           if [ "$LATEST" != "$CURRENT" ]; then
@@ -32,9 +47,13 @@ jobs:
       - name: Update formula
         if: steps.check.outputs.update == 'true'
         run: |
+          PACKAGE="${{ matrix.package }}"
+          FORMULA="${{ matrix.formula }}"
           VERSION="${{ steps.check.outputs.latest }}"
+          CLASS_NAME="$(echo "$PACKAGE" | python3 -c "import sys; print(sys.stdin.read().strip().title())")"
+
           # Get sdist URL and SHA256 from PyPI
-          eval $(curl -s "https://pypi.org/pypi/parro/${VERSION}/json" | python3 -c "
+          eval $(curl -s "https://pypi.org/pypi/${PACKAGE}/${VERSION}/json" | python3 -c "
           import sys, json
           data = json.load(sys.stdin)
           for u in data['urls']:
@@ -44,13 +63,15 @@ jobs:
                   break
           ")
 
-          # Update formula
-          cat > Formula/parro.rb << EOF
-          class Parro < Formula
+          HOMEPAGE=$(grep -oP 'homepage "\K[^"]+' "$FORMULA")
+          DESC=$(grep -oP 'desc "\K[^"]+' "$FORMULA")
+
+          cat > "$FORMULA" << EOF
+          class ${CLASS_NAME} < Formula
             include Language::Python::Virtualenv
 
-            desc "CLI for the Parro school communication platform"
-            homepage "https://github.com/anneschuth/parro-cli"
+            desc "${DESC}"
+            homepage "${HOMEPAGE}"
             url "${URL}"
             sha256 "${SHA}"
             license "MIT"
@@ -59,22 +80,24 @@ jobs:
 
             def install
               virtualenv_install_with_resources(extra_pip_args: ["--extra-index-url", "https://pypi.org/simple"])
-              system libexec/"bin/pip", "install", "parro[cli]==#{version}"
+              system libexec/"bin/pip", "install", "${PACKAGE}[cli]==#{version}"
             end
 
             test do
-              assert_match "parro", shell_output("#{bin}/parro --help")
+              assert_match "${PACKAGE}", shell_output("#{bin}/${PACKAGE} --help")
             end
           end
           EOF
           # Remove leading whitespace from heredoc
-          sed -i 's/^          //' Formula/parro.rb
+          sed -i 's/^          //' "$FORMULA"
 
       - name: Commit and push
         if: steps.check.outputs.update == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/parro.rb
-          git commit -m "chore: update parro to ${{ steps.check.outputs.latest }}"
+          git pull --rebase
+          git add "${{ matrix.formula }}"
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: update ${{ matrix.package }} to ${{ steps.check.outputs.latest }}"
           git push
